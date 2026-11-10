@@ -621,9 +621,10 @@ LIMIT 10;
 ### G.1. Права на схему
 
 ```sql
-SELECT nspname AS schema_name,
-       has_schema_privilege('inspector', nspname, 'USAGE') AS usage,
-       has_schema_privilege('inspector', nspname, 'CREATE') AS create
+SELECT
+    nspname AS schema_name,
+    has_schema_privilege('inspector', nspname, 'USAGE')  AS usage,
+    has_schema_privilege('inspector', nspname, 'CREATE') AS create
 FROM pg_namespace
 WHERE nspname = '<фамилия>_food';
 ```
