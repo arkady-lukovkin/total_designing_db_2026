@@ -9,6 +9,7 @@
 Из корня репозитория выполнить:
 
 ```sh
+psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/00_types.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/01_tables.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/02_integrity.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/03_test_data.sql
@@ -17,8 +18,11 @@ psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/05_rating.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/06_statistics.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/07_courier_salary.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/08_money_report.sql
+psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/09_triggers.sql
 psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/grants.sql
 ```
+
+`00_types.sql` создаёт схему и ENUM-типы, `01_tables.sql` — таблицы и представления совместимости, файлы `02`–`08` — функции, процедуры и денежный отчёт, `09_triggers.sql` — все триггеры. Установку нужно завершить до записи данных.
 
 Первый скрипт создаёт новую схему. Повторный запуск поверх существующей схемы завершается ошибкой, сохраняя её данные.
 
@@ -26,10 +30,10 @@ psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/grants.sql
 
 | Тикет | Реализация |
 |---|---|
-| FOOD-101 | `01_tables.sql`, `02_integrity.sql`, обоснования в `constraints.md` |
+| FOOD-101 | `00_types.sql`, `01_tables.sql`, `02_integrity.sql`, `09_triggers.sql`, обоснования в `constraints.md` |
 | FOOD-102 / FOOD-103 | `03_test_data.sql`: генерация нового пакета и очистка |
 | FOOD-104 | `04_add_product.sql` |
-| FOOD-105 | `05_rating.sql` |
+| FOOD-105 | `05_rating.sql`, `09_triggers.sql` |
 | FOOD-106 | `06_statistics.sql` |
 | FOOD-107 | `07_courier_salary.sql` |
 | FOOD-108 | `08_money_report.sql` |
@@ -60,5 +64,7 @@ CALL erase_test_data();
 ```
 
 Заказ, его позиции и успешная оплата создаются одной транзакцией: отложенные ограничения проверяют готовый набор на COMMIT. Историческая цена каждой позиции передаётся в `unit_price`. Начальный рейтинг нового блюда в `add_product` — NULL.
+
+Ядро хранит заказ в `order_core`, попытку оплаты — в `payment_core`. Совместимые представления `"order"` и `payment` сохраняют прежние поля; комиссия, итог и сумма оплаты вычисляются при чтении. Рейтинги проверяются на COMMIT, в том числе при прямом UPDATE. Подробности 3НФ и границы совместимости описаны в `constraints.md`.
 
 Трактовки неоднозначных правил, технические диапазоны и нормализация описаны в `constraints.md`; фактические результаты запусков — в `tests.md`. Требования находятся в `docs/`.

@@ -4,7 +4,7 @@ SET LOCAL search_path = lukovkin_food, pg_catalog;
 CREATE OR REPLACE PROCEDURE erase_test_data()
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
 BEGIN
-    TRUNCATE review, payment, order_structure, "order", courier_pay,
+    TRUNCATE review, payment_core, order_structure, order_core, courier_pay,
              product, product_category, restaurant, client_address, client, courier, address;
 END $$;
 
@@ -16,7 +16,7 @@ DECLARE
     v_clients uuid[] := '{}'; v_couriers uuid[] := '{}';
     v_categories uuid[] := '{}'; v_restaurants uuid[] := '{}';
     v_addresses uuid[] := '{}'; v_products uuid[] := '{}';
-    v_orders uuid[] := '{}'; v_payment_amounts numeric[] := '{}';
+    v_orders uuid[] := '{}';
     v_payment_times timestamp[] := '{}'; v_payment_types payment_type[] := '{}';
     v_position_orders uuid[] := '{}'; v_position_products uuid[] := '{}';
     v_position_quantities numeric[] := '{}'; v_position_prices numeric[] := '{}';
@@ -221,8 +221,6 @@ BEGIN
         END LOOP;
         v_payment_type := (enum_range(NULL::payment_type))[1 + floor(random() * 3)::integer];
         v_orders := array_append(v_orders, v_order);
-        v_payment_amounts := array_append(v_payment_amounts,
-            round(v_amount, 2) + round(round(v_amount, 2) * 0.10, 2));
         v_payment_times := array_append(v_payment_times, v_created + random() * (v_now - v_created));
         v_payment_types := array_append(v_payment_types, v_payment_type);
         v_review_type := (enum_range(NULL::review_entity_type))[1 + floor(random() * 3)::integer];
@@ -257,12 +255,12 @@ BEGIN
 
     -- Ровно 5n платежей для 5n заказов при BR-8.1 означает один успех каждому.
     -- pay_status уже рассчитан независимо; не полагаемся на платёжный триггер.
-    INSERT INTO payment (order_id, type, amount, transaction_id, transaction_timestamp, status)
-    SELECT u.order_id, u.type, u.amount,
+    INSERT INTO payment_core (order_id, type, transaction_id, transaction_timestamp, status)
+    SELECT u.order_id, u.type,
            CASE WHEN u.type = 'наличные' THEN NULL ELSE exts.uuid_generate_v4() END,
            u.transaction_timestamp, 'успех'::payment_status
-    FROM unnest(v_orders, v_payment_types, v_payment_amounts, v_payment_times)
-         AS u(order_id, type, amount, transaction_timestamp);
+    FROM unnest(v_orders, v_payment_types, v_payment_times)
+         AS u(order_id, type, transaction_timestamp);
 
     -- Шесть календарных месяцев: коэффициент месяца зависит от доставок прошлого.
     INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)

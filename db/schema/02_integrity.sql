@@ -1,6 +1,55 @@
 BEGIN;
 SET LOCAL search_path = lukovkin_food, pg_catalog;
 
+-- Совместимый интерфейс оплаты принимает сумму, но не хранит её повторно.
+CREATE FUNCTION write_payment() RETURNS trigger
+LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
+DECLARE v_total numeric; v_current payment_core%ROWTYPE;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        SELECT * INTO v_current FROM payment_core
+        WHERE payment_id = OLD.payment_id FOR UPDATE;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+        -- NEW представления может быть прочитан до ожидания чужого UPDATE.
+        -- Не перезаписываем более свежие поля устаревшим снимком.
+        IF (v_current.order_id, v_current.type, v_current.transaction_id,
+            v_current.transaction_timestamp, v_current.status)
+           IS DISTINCT FROM
+           (OLD.order_id, OLD.type, OLD.transaction_id, OLD.transaction_timestamp, OLD.status) THEN
+            RAISE EXCEPTION 'Оплата % изменена параллельно; повторите транзакцию', OLD.payment_id
+                USING ERRCODE = '40001';
+        END IF;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        DELETE FROM payment_core WHERE payment_id = OLD.payment_id;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+        RETURN OLD;
+    END IF;
+
+    SELECT total_amount INTO v_total FROM "order"
+    WHERE order_id = NEW.order_id FOR NO KEY UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Оплата ссылается на отсутствующий заказ %', NEW.order_id
+            USING ERRCODE = '23503';
+    END IF;
+    IF NEW.amount IS DISTINCT FROM v_total THEN
+        RAISE EXCEPTION 'BR-8.4: сумма оплаты заказа % должна равняться %', NEW.order_id, v_total
+            USING ERRCODE = '23514';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO payment_core (payment_id, order_id, type, transaction_id, transaction_timestamp, status)
+        VALUES (NEW.payment_id, NEW.order_id, NEW.type, NEW.transaction_id, NEW.transaction_timestamp, NEW.status);
+    ELSE
+        UPDATE payment_core SET payment_id = NEW.payment_id, order_id = NEW.order_id,
+            type = NEW.type, transaction_id = NEW.transaction_id,
+            transaction_timestamp = NEW.transaction_timestamp, status = NEW.status
+        WHERE payment_id = OLD.payment_id;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+    END IF;
+    NEW.amount := v_total;
+    RETURN NEW;
+END $$;
+
 CREATE FUNCTION check_position_restaurant() RETURNS trigger
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
 DECLARE v_restaurant uuid; v_product_restaurant uuid;
@@ -17,8 +66,6 @@ BEGIN
     END IF;
     RETURN NEW;
 END $$;
-CREATE TRIGGER position_restaurant BEFORE INSERT OR UPDATE ON order_structure
-FOR EACH ROW EXECUTE FUNCTION check_position_restaurant();
 
 CREATE FUNCTION guard_restaurant_change() RETURNS trigger
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
@@ -41,12 +88,6 @@ BEGIN
     END IF;
     RETURN NEW;
 END $$;
-CREATE TRIGGER product_restaurant_change BEFORE UPDATE OF restaurant_id ON product
-FOR EACH ROW WHEN (OLD.restaurant_id IS DISTINCT FROM NEW.restaurant_id)
-EXECUTE FUNCTION guard_restaurant_change();
-CREATE TRIGGER order_restaurant_change BEFORE UPDATE OF restaurant_id ON "order"
-FOR EACH ROW WHEN (OLD.restaurant_id IS DISTINCT FROM NEW.restaurant_id)
-EXECUTE FUNCTION guard_restaurant_change();
 
 -- Заказ, позиции и успешная оплата образуют одну транзакцию.
 -- Общая функция трёх constraint triggers проверяет итог на COMMIT.
@@ -56,7 +97,6 @@ DECLARE
     v_ids uuid[] := '{}';
     v_id uuid;
     v_subtotal numeric;
-    v_total numeric;
     v_expected numeric;
     v_pay order_pay_status;
     v_positions bigint;
@@ -74,8 +114,8 @@ BEGIN
     FOR v_id IN
         SELECT DISTINCT id FROM unnest(v_ids) AS changed(id) ORDER BY id
     LOOP
-        SELECT order_amount, total_amount, pay_status
-        INTO v_subtotal, v_total, v_pay
+        SELECT order_amount, pay_status
+        INTO v_subtotal, v_pay
         FROM "order"
         WHERE order_id = v_id
         FOR NO KEY UPDATE;
@@ -99,17 +139,10 @@ BEGIN
         END IF;
 
         SELECT count(*) FILTER (WHERE status = 'успех') INTO v_success
-        FROM payment
+        FROM payment_core
         WHERE order_id = v_id;
         IF v_success <> 1 THEN
             RAISE EXCEPTION 'BR-8.1: заказ % должен иметь ровно одну успешную оплату на COMMIT', v_id
-                USING ERRCODE = '23514';
-        END IF;
-        IF EXISTS (
-            SELECT 1 FROM payment
-            WHERE order_id = v_id AND amount <> v_total
-        ) THEN
-            RAISE EXCEPTION 'BR-8.4: сумма каждой попытки оплаты заказа % должна равняться %', v_id, v_total
                 USING ERRCODE = '23514';
         END IF;
         IF v_pay <> 'оплачен' THEN
@@ -119,12 +152,6 @@ BEGIN
     END LOOP;
     RETURN NULL;
 END $$;
-CREATE CONSTRAINT TRIGGER complete_order AFTER INSERT OR UPDATE ON "order"
-DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION order_integrity();
-CREATE CONSTRAINT TRIGGER complete_positions AFTER INSERT OR UPDATE OR DELETE ON order_structure
-DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION order_integrity();
-CREATE CONSTRAINT TRIGGER complete_payments AFTER INSERT OR UPDATE OR DELETE ON payment
-DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION order_integrity();
 
 CREATE FUNCTION sync_payment_status() RETURNS trigger
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
@@ -145,17 +172,10 @@ BEGIN
           CASE WHEN bool_or(p.status = 'успех') THEN 'оплачен'::order_pay_status
                WHEN count(p.payment_id) > 0 AND bool_and(p.status = 'ошибка') THEN 'ошибка'::order_pay_status
                ELSE 'ожидает'::order_pay_status END AS expected
-        FROM unnest(v_ids) a(order_id) LEFT JOIN payment p USING (order_id)
+        FROM unnest(v_ids) a(order_id) LEFT JOIN payment_core p USING (order_id)
         GROUP BY a.order_id
     ) x
     WHERE o.order_id = x.order_id AND o.pay_status IS DISTINCT FROM x.expected;
     RETURN NULL;
 END $$;
-CREATE TRIGGER payment_insert_status AFTER INSERT ON payment
-REFERENCING NEW TABLE AS new_payments FOR EACH STATEMENT EXECUTE FUNCTION sync_payment_status();
-CREATE TRIGGER payment_update_status AFTER UPDATE ON payment
-REFERENCING OLD TABLE AS old_payments NEW TABLE AS new_payments
-FOR EACH STATEMENT EXECUTE FUNCTION sync_payment_status();
-CREATE TRIGGER payment_delete_status AFTER DELETE ON payment
-REFERENCING OLD TABLE AS old_payments FOR EACH STATEMENT EXECUTE FUNCTION sync_payment_status();
 COMMIT;
