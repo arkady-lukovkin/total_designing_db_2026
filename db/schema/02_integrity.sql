@@ -153,6 +153,17 @@ BEGIN
     RETURN NULL;
 END $$;
 
+-- TRUNCATE не запускает отложенные строковые проверки заказа.
+CREATE FUNCTION guard_order_truncate() RETURNS trigger
+LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM order_core) THEN
+        RAISE EXCEPTION 'Нельзя очистить все позиции или оплаты при сохранённых заказах'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END $$;
+
 CREATE FUNCTION sync_payment_status() RETURNS trigger
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
 DECLARE v_ids uuid[];

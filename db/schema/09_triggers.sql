@@ -48,10 +48,21 @@ REFERENCING NEW TABLE AS new_payments
 FOR EACH STATEMENT
 EXECUTE FUNCTION sync_payment_status();
 
+CREATE TRIGGER positions_truncate_integrity
+AFTER TRUNCATE ON order_structure
+FOR EACH STATEMENT
+EXECUTE FUNCTION guard_order_truncate();
+
+CREATE TRIGGER payments_truncate_integrity
+AFTER TRUNCATE ON payment_core
+FOR EACH STATEMENT
+EXECUTE FUNCTION guard_order_truncate();
+
 CREATE TRIGGER payment_update_status
 AFTER UPDATE ON payment_core
 REFERENCING OLD TABLE AS old_payments NEW TABLE AS new_payments
-FOR EACH STATEMENT EXECUTE FUNCTION sync_payment_status();
+FOR EACH STATEMENT
+EXECUTE FUNCTION sync_payment_status();
 
 CREATE TRIGGER payment_delete_status
 AFTER DELETE ON payment_core
@@ -84,6 +95,7 @@ EXECUTE FUNCTION check_rating_integrity();
 
 CREATE TRIGGER review_clear_ratings
 AFTER TRUNCATE ON review
-FOR EACH STATEMENT EXECUTE FUNCTION clear_ratings();
+FOR EACH STATEMENT
+EXECUTE FUNCTION clear_ratings();
 
 COMMIT;
