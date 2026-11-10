@@ -1,5 +1,3 @@
--- DIAGNOSTIC CANDIDATE ONLY; not installed in project schema.
--- Source SHA256: 9407fafb0de4f4d8756d8234cef9ca379b85baa106f41fb5a3bcefa38f0cc843
 BEGIN;
 SET LOCAL search_path = lukovkin_food, pg_catalog;
 

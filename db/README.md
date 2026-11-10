@@ -36,20 +36,18 @@ psql -X -v ON_ERROR_STOP=1 -d foodexpress -f db/schema/grants.sql
 | FOOD-109 | `grants.sql` |
 | FOOD-110 | `foodexpress_lukovkin.backup`, восстановление и общий протокол `tests.md` |
 
-История Git содержит отдельные коммиты по этим частям. FOOD-102/103 объединены, поскольку очистка нужна для повторяемой проверки генератора. Общие регрессионные сценарии входят в итоговый комплект проверки всех тикетов.
+FOOD-102/103 объединены: генерация и очистка работают с одним набором связанных таблиц.
 
-## Восстановление и проверка
+## Восстановление
 
-В новой подготовленной базе `foodexpress_test` с `exts.uuid_generate_v4()`:
+В новой подготовленной базе `foodexpress_restored` с `exts.uuid_generate_v4()`:
 
 ```sh
-pg_restore --exit-on-error --no-owner --no-acl -d foodexpress_test db/foodexpress_lukovkin.backup
-psql -X -v ON_ERROR_STOP=1 -d foodexpress_test -f db/schema/grants.sql
-psql -X -h localhost -U inspector -d foodexpress_test -v foodexpress_test_database=foodexpress_test -f db/checks.sql
-psql -X -h localhost -U inspector -d foodexpress_test -v foodexpress_test_database=foodexpress_test -f db/boundary_checks.sql
+pg_restore --exit-on-error --no-owner --no-acl -d foodexpress_restored db/foodexpress_lukovkin.backup
+psql -X -v ON_ERROR_STOP=1 -d foodexpress_restored -f db/schema/grants.sql
 ```
 
-Пароль inspector указан в задании FOOD-109. Проверки удаляют учебные данные в `lukovkin_food` и требуют явно указать имя выделенной тестовой БД. `boundary_checks.sql` включает `regression_checks.sql`; отдельно повторять его для полного прогона не нужно.
+Пароль inspector указан в задании FOOD-109. После восстановления подключиться к базе под этой ролью.
 
 После подключения inspector основные команды:
 
@@ -63,4 +61,4 @@ CALL erase_test_data();
 
 Заказ, его позиции и успешная оплата создаются одной транзакцией: отложенные ограничения проверяют готовый набор на COMMIT. Историческая цена каждой позиции передаётся в `unit_price`. Начальный рейтинг нового блюда в `add_product` — NULL.
 
-Трактовки неоднозначных правил, технические диапазоны и нормализация описаны в `constraints.md`; фактические результаты запусков — в `tests.md`. Исходные требования хранятся в `docs/`; исправление проверки прав G.1 в `templates/tests.md` синхронизировано с upstream `94fad92` от 7 ноября 2026.
+Трактовки неоднозначных правил, технические диапазоны и нормализация описаны в `constraints.md`; фактические результаты запусков — в `tests.md`. Требования находятся в `docs/`.
