@@ -1,3 +1,5 @@
+-- DIAGNOSTIC CANDIDATE ONLY; not installed in project schema.
+-- Source SHA256: 9407fafb0de4f4d8756d8234cef9ca379b85baa106f41fb5a3bcefa38f0cc843
 BEGIN;
 SET LOCAL search_path = lukovkin_food, pg_catalog;
 
@@ -18,8 +20,14 @@ DECLARE
     v_addresses uuid[] := '{}'; v_products uuid[] := '{}';
     v_orders uuid[] := '{}'; v_payment_amounts numeric[] := '{}';
     v_payment_times timestamp[] := '{}'; v_payment_types payment_type[] := '{}';
+    v_position_orders uuid[] := '{}'; v_position_products uuid[] := '{}';
+    v_position_quantities numeric[] := '{}'; v_position_prices numeric[] := '{}';
+    v_review_times timestamp[] := '{}'; v_review_entities uuid[] := '{}';
+    v_review_types review_entity_type[] := '{}'; v_review_descriptions text[] := '{}';
+    v_review_photos text[] := '{}'; v_review_ratings numeric[] := '{}';
     v_prices numeric[] := '{}'; v_hires date[] := '{}'; v_dismissals date[] := '{}';
     v_id uuid; v_order uuid; v_first_product uuid; v_entity uuid;
+    v_review_description text;
     v_hire date; v_dismissal date; v_courier_status courier_status;
     v_order_status order_status; v_review_type review_entity_type; v_payment_type payment_type;
     v_client_index integer; v_restaurant_index integer; v_courier_index integer;
@@ -208,8 +216,10 @@ BEGIN
                         FROM generate_series(1, 1 + floor(random() * 240)::int)) END)
         RETURNING order_id INTO v_order;
         FOR j IN 1..v_count LOOP
-            INSERT INTO order_structure (order_id, product_id, quantity, unit_price)
-            VALUES (v_order, v_products[v_selected[j]], v_quantities[j], v_prices[v_selected[j]]);
+            v_position_orders := array_append(v_position_orders, v_order);
+            v_position_products := array_append(v_position_products, v_products[v_selected[j]]);
+            v_position_quantities := array_append(v_position_quantities, v_quantities[j]);
+            v_position_prices := array_append(v_position_prices, v_prices[v_selected[j]]);
         END LOOP;
         v_payment_type := (enum_range(NULL::payment_type))[1 + floor(random() * 3)::integer];
         v_orders := array_append(v_orders, v_order);
@@ -220,23 +230,41 @@ BEGIN
         v_review_type := (enum_range(NULL::review_entity_type))[1 + floor(random() * 3)::integer];
         v_entity := CASE v_review_type WHEN 'блюдо' THEN v_first_product
                       WHEN 'ресторан' THEN v_restaurants[v_restaurant_index] ELSE v_order END;
-        INSERT INTO review (review_timestamp, entity_id, entity_type,
-                            order_id, description, photo_url, rating)
-        VALUES (v_created + random() * (v_now - v_created), v_entity,
-                v_review_type, v_order, (SELECT string_agg(substr(v_alphabet, 1 + floor(random() * 33)::int, 1), '')
-                        FROM generate_series(1, 1 + floor(random() * 240)::int)),
-                CASE WHEN random() < 0.25 THEN NULL
-                     ELSE 'https://example.invalid/' || exts.uuid_generate_v4()::text || '.jpg' END,
-                (100 + floor(random() * 401))::numeric / 100);
+        v_review_times := array_append(v_review_times, v_created + random() * (v_now - v_created));
+        v_review_entities := array_append(v_review_entities, v_entity);
+        v_review_types := array_append(v_review_types, v_review_type);
+        -- Сначала скаляр: подзапрос внутри array_append копировал бы растущий массив.
+        SELECT string_agg(substr(v_alphabet, 1 + floor(random() * 33)::int, 1), '')
+        INTO v_review_description
+        FROM generate_series(1, 1 + floor(random() * 240)::int);
+        v_review_descriptions := array_append(v_review_descriptions, v_review_description);
+        v_review_photos := array_append(v_review_photos,
+            CASE WHEN random() < 0.25 THEN NULL
+                 ELSE 'https://example.invalid/' || exts.uuid_generate_v4()::text || '.jpg' END);
+        v_review_ratings := array_append(v_review_ratings, (100 + floor(random() * 401))::numeric / 100);
     END LOOP;
+
+    -- Все заказы уже существуют: позиции вставляются одним пакетом, затем отзывы.
+    -- Немедленные FK отзывов видят уже заполненный состав заказа.
+    INSERT INTO order_structure (order_id, product_id, quantity, unit_price)
+    SELECT u.order_id, u.product_id, u.quantity, u.unit_price
+    FROM unnest(v_position_orders, v_position_products, v_position_quantities, v_position_prices)
+         AS u(order_id, product_id, quantity, unit_price);
+
+    INSERT INTO review (review_timestamp, entity_id, entity_type, order_id, description, photo_url, rating)
+    SELECT u.review_timestamp, u.entity_id, u.entity_type, u.order_id, u.description, u.photo_url, u.rating
+    FROM unnest(v_orders, v_review_times, v_review_entities, v_review_types,
+                v_review_descriptions, v_review_photos, v_review_ratings)
+         AS u(order_id, review_timestamp, entity_id, entity_type, description, photo_url, rating);
 
     -- Ровно 5n платежей для 5n заказов при BR-8.1 означает один успех каждому.
     -- pay_status уже рассчитан независимо; не полагаемся на платёжный триггер.
     INSERT INTO payment (order_id, type, amount, transaction_id, transaction_timestamp, status)
-    SELECT u.order_id, v_payment_types[u.i], v_payment_amounts[u.i],
-           CASE WHEN v_payment_types[u.i] = 'наличные' THEN NULL ELSE exts.uuid_generate_v4() END,
-           v_payment_times[u.i], 'успех'::payment_status
-    FROM unnest(v_orders) WITH ORDINALITY u(order_id, i);
+    SELECT u.order_id, u.type, u.amount,
+           CASE WHEN u.type = 'наличные' THEN NULL ELSE exts.uuid_generate_v4() END,
+           u.transaction_timestamp, 'успех'::payment_status
+    FROM unnest(v_orders, v_payment_types, v_payment_amounts, v_payment_times)
+         AS u(order_id, type, amount, transaction_timestamp);
 
     -- Шесть календарных месяцев: коэффициент месяца зависит от доставок прошлого.
     INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)
