@@ -135,7 +135,7 @@ CREATE TABLE product (
     CONSTRAINT product_rating_range CHECK (rating BETWEEN 0 AND 5)
 );
 
-CREATE TABLE order_core (
+CREATE TABLE "order" (
     order_id uuid PRIMARY KEY DEFAULT exts.uuid_generate_v4(),
     courier_id uuid NOT NULL REFERENCES courier,
     client_id uuid NOT NULL REFERENCES client,
@@ -144,6 +144,10 @@ CREATE TABLE order_core (
     order_timestamp timestamp NOT NULL DEFAULT localtimestamp,
     delivery_timestamp timestamp,
     order_amount numeric(8, 2) NOT NULL,
+    commission numeric(8, 2) GENERATED ALWAYS AS (round(order_amount * 0.10, 2)) STORED NOT NULL,
+    total_amount numeric(9, 2) GENERATED ALWAYS AS (
+        order_amount + round(order_amount * 0.10, 2)
+    ) STORED NOT NULL,
     status order_status NOT NULL DEFAULT 'создан',
     pay_status order_pay_status NOT NULL DEFAULT 'ожидает',
     description text,
@@ -152,11 +156,12 @@ CREATE TABLE order_core (
         FOREIGN KEY (client_id, address_id)
         REFERENCES client_address (client_id, address_id),
     CONSTRAINT order_restaurant_unique UNIQUE (order_id, restaurant_id),
+    CONSTRAINT order_total_unique UNIQUE (order_id, total_amount),
     CONSTRAINT order_amount_nonnegative CHECK (
         order_amount >= 0
         AND order_amount <> 'NaN'::numeric
     ),
-    CONSTRAINT order_min_total CHECK (order_amount + round(order_amount * 0.10, 2) >= 1000),
+    CONSTRAINT order_min_total CHECK (total_amount >= 1000),
     CONSTRAINT order_delivered_time CHECK (
         status <> 'доставлен'
         OR delivery_timestamp IS NOT NULL
@@ -167,27 +172,8 @@ CREATE TABLE order_core (
     )
 );
 
--- Прежние имена, порядок и типы полей; исходные поля автоматически обновляемы.
--- Производные суммы существуют только в результате чтения.
-CREATE VIEW "order" AS
-SELECT
-    order_id,
-    courier_id,
-    client_id,
-    address_id,
-    restaurant_id,
-    order_timestamp,
-    delivery_timestamp,
-    order_amount,
-    round(order_amount * 0.10, 2)::numeric(8, 2) AS commission,
-    (order_amount + round(order_amount * 0.10, 2))::numeric(9, 2) AS total_amount,
-    status,
-    pay_status,
-    description
-FROM order_core;
-
 CREATE TABLE order_structure (
-    order_id uuid NOT NULL REFERENCES order_core ON DELETE CASCADE,
+    order_id uuid NOT NULL REFERENCES "order" ON DELETE CASCADE,
     product_id uuid NOT NULL REFERENCES product,
     quantity numeric(6, 3) NOT NULL,
     unit_price numeric(7, 2) NOT NULL,
@@ -203,14 +189,18 @@ CREATE TABLE order_structure (
     )
 );
 
-CREATE TABLE payment_core (
+CREATE TABLE payment (
     payment_id uuid PRIMARY KEY DEFAULT exts.uuid_generate_v4(),
-    order_id uuid NOT NULL REFERENCES order_core ON DELETE CASCADE,
+    order_id uuid NOT NULL,
     type payment_type NOT NULL,
+    amount numeric(9, 2) NOT NULL,
     transaction_id uuid UNIQUE,
     transaction_timestamp timestamp NOT NULL DEFAULT localtimestamp,
     status payment_status NOT NULL,
 
+    CONSTRAINT payment_order_total_fk FOREIGN KEY (order_id, amount)
+        REFERENCES "order" (order_id, total_amount)
+        ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT payment_transaction_required CHECK (
         (type = 'наличные' AND transaction_id IS NULL)
         OR (type <> 'наличные' AND transaction_id IS NOT NULL)
@@ -218,30 +208,15 @@ CREATE TABLE payment_core (
 );
 
 CREATE UNIQUE INDEX payment_one_success
-    ON payment_core (order_id)
+    ON payment (order_id)
     WHERE status = 'успех';
-
-CREATE VIEW payment AS
-SELECT
-    p.payment_id,
-    p.order_id,
-    p.type,
-    o.total_amount AS amount,
-    p.transaction_id,
-    p.transaction_timestamp,
-    p.status
-FROM payment_core p
-JOIN "order" o USING (order_id);
-
-ALTER VIEW payment ALTER COLUMN payment_id SET DEFAULT exts.uuid_generate_v4();
-ALTER VIEW payment ALTER COLUMN transaction_timestamp SET DEFAULT localtimestamp;
 
 CREATE TABLE review (
     review_id uuid PRIMARY KEY DEFAULT exts.uuid_generate_v4(),
     review_timestamp timestamp NOT NULL DEFAULT localtimestamp,
     entity_id uuid NOT NULL,
     entity_type review_entity_type NOT NULL,
-    order_id uuid NOT NULL REFERENCES order_core ON DELETE CASCADE,
+    order_id uuid NOT NULL REFERENCES "order" ON DELETE CASCADE,
     description text NOT NULL,
     photo_url text,
     rating numeric(3, 2) NOT NULL,
@@ -271,26 +246,20 @@ CREATE TABLE review (
         REFERENCES order_structure (order_id, product_id),
     CONSTRAINT review_restaurant_fk
         FOREIGN KEY (order_id, restaurant_id)
-        REFERENCES order_core (order_id, restaurant_id)
+        REFERENCES "order" (order_id, restaurant_id)
 );
-
--- Автор отзыва определяется заказом, поэтому второй независимой копии client_id нет.
-CREATE VIEW review_with_client AS
-SELECT
-    r.*,
-    o.client_id
-FROM review r
-JOIN "order" o USING (order_id);
 
 CREATE INDEX product_restaurant_idx ON product (restaurant_id);
 
 CREATE INDEX order_courier_date_idx
-    ON order_core (courier_id, order_timestamp)
+    ON "order" (courier_id, order_timestamp)
     WHERE status = 'доставлен';
 
-CREATE INDEX order_restaurant_idx ON order_core (restaurant_id);
+CREATE INDEX order_restaurant_idx ON "order" (restaurant_id);
 
-CREATE INDEX payment_order_idx ON payment_core (order_id);
+CREATE INDEX order_client_address_idx ON "order" (client_id, address_id);
+
+CREATE INDEX payment_order_idx ON payment (order_id);
 
 CREATE INDEX order_structure_product_idx ON order_structure (product_id);
 

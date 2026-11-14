@@ -85,6 +85,11 @@ BEGIN
         IF NOT FOUND THEN CONTINUE; END IF;
         SELECT round(avg(rating), 2) INTO v_expected FROM review
         WHERE entity_type = v_type AND entity_id = v_id;
+        -- Стартовая оценка блюда допустима только при его создании.
+        -- После изменения отзывов действует результат AVG, в том числе NULL.
+        IF TG_TABLE_NAME = 'product' AND TG_OP = 'INSERT' AND v_expected IS NULL THEN
+            CONTINUE;
+        END IF;
         IF v_actual IS DISTINCT FROM v_expected THEN
             RAISE EXCEPTION 'BR-9.6/9.7: рейтинг % % равен %, ожидается %',
                 v_type, v_id, v_actual, v_expected USING ERRCODE = '23514';
@@ -93,12 +98,18 @@ BEGIN
     RETURN NULL;
 END $$;
 
--- TRUNCATE не вызывает строковые DELETE-триггеры.
+-- До TRUNCATE ещё доступны цели удаляемых отзывов.
 CREATE FUNCTION clear_ratings() RETURNS trigger
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
 BEGIN
-    UPDATE product SET rating = NULL WHERE rating IS NOT NULL;
-    UPDATE restaurant SET rating = NULL WHERE rating IS NOT NULL;
+    UPDATE product p SET rating = NULL
+    WHERE p.rating IS NOT NULL AND EXISTS (
+        SELECT 1 FROM review r WHERE r.entity_type = 'блюдо' AND r.entity_id = p.product_id
+    );
+    UPDATE restaurant r SET rating = NULL
+    WHERE r.rating IS NOT NULL AND EXISTS (
+        SELECT 1 FROM review rv WHERE rv.entity_type = 'ресторан' AND rv.entity_id = r.restaurant_id
+    );
     RETURN NULL;
 END $$;
 COMMIT;

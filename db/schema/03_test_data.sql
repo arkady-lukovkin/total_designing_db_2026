@@ -4,7 +4,7 @@ SET LOCAL search_path = lukovkin_food, pg_catalog;
 CREATE OR REPLACE PROCEDURE erase_test_data()
 LANGUAGE plpgsql SET search_path = lukovkin_food, pg_catalog AS $$
 BEGIN
-    TRUNCATE review, payment_core, order_structure, order_core, courier_pay,
+    TRUNCATE review, payment, order_structure, "order", courier_pay,
              product, product_category, restaurant, client_address, client, courier, address;
 END $$;
 
@@ -18,6 +18,7 @@ DECLARE
     v_addresses uuid[] := '{}'; v_products uuid[] := '{}';
     v_orders uuid[] := '{}';
     v_payment_times timestamp[] := '{}'; v_payment_types payment_type[] := '{}';
+    v_payment_statuses payment_status[] := '{}';
     v_position_orders uuid[] := '{}'; v_position_products uuid[] := '{}';
     v_position_quantities numeric[] := '{}'; v_position_prices numeric[] := '{}';
     v_review_times timestamp[] := '{}'; v_review_entities uuid[] := '{}';
@@ -28,10 +29,12 @@ DECLARE
     v_review_description text;
     v_hire date; v_dismissal date; v_courier_status courier_status;
     v_order_status order_status; v_review_type review_entity_type; v_payment_type payment_type;
+    v_payment_status payment_status;
     v_client_index integer; v_restaurant_index integer; v_courier_index integer;
     v_product_index integer; v_count integer; v_swap integer; v_temp integer;
-    v_indices integer[]; v_largest integer; v_max_price numeric;
+    v_indices integer[];
     v_selected integer[]; v_quantities numeric[]; v_quantity numeric; v_amount numeric;
+    v_target_amount numeric;
     v_quantity_limit integer; v_work_start integer; v_work_end integer;
     v_now timestamp := localtimestamp;
     v_history_start timestamp := greatest(date_trunc('month', localtimestamp) - interval '5 months',
@@ -126,15 +129,8 @@ BEGIN
         -- Один из адресов также доступен соседнему клиенту: пример M:N.
         INSERT INTO client_address VALUES (v_clients[i], v_addresses[(i % value) * 4 + 1])
         ON CONFLICT DO NOTHING;
-        v_max_price := 0;
         FOR j IN 1..5 LOOP
-            v_amount := floor(random() * 10000000)::numeric / 100;
-            -- Хотя отдельное блюдо может быть бесплатным, ресторан должен позволять
-            -- собрать заказ >= 1000 с quantity <= 999.999.
-            IF j = 5 AND v_max_price < 1 AND v_amount < 1 THEN
-                v_amount := 1 + floor(random() * 9999900)::numeric / 100;
-            END IF;
-            v_max_price := greatest(v_max_price, v_amount);
+            v_amount := 300 + floor(random() * 100001)::numeric / 100;
             INSERT INTO product (product_name, product_category_id, price, restaurant_id,
                                  photo_url, status, description)
             VALUES ((SELECT string_agg(substr(v_alphabet, 1 + floor(random() * 33)::int, 1), '')
@@ -161,55 +157,42 @@ BEGIN
             v_swap := 1 + floor(random() * j)::integer;
             v_temp := v_indices[j]; v_indices[j] := v_indices[v_swap]; v_indices[v_swap] := v_temp;
         END LOOP;
-        v_selected := '{}'; v_quantities := '{}'; v_amount := 0;
-        v_largest := 1; v_max_price := 0;
+        v_selected := '{}';
+        v_quantities := array_fill(0::numeric, ARRAY[v_count]);
+        v_amount := 0;
+        -- Оставляем запас на округление количества до 0.001.
+        -- Итог с комиссией укладывается в 1000–5000 рублей.
+        v_target_amount := 910 + floor(random() * 363301)::numeric / 100;
         FOR j IN 1..v_count LOOP
-            v_product_index := (v_restaurant_index - 1) * 5 + v_indices[j];
-            v_selected := array_append(v_selected, v_product_index);
-            IF v_prices[v_product_index] > v_max_price THEN
-                v_max_price := v_prices[v_product_index]; v_largest := j;
-            END IF;
+            v_selected[j] := (v_restaurant_index - 1) * 5 + v_indices[j];
         END LOOP;
-        -- Исключаем только наборы, в которых невозможно набрать минимальный чек.
-        IF v_max_price < 1 THEN
-            FOR j IN (v_count + 1)..5 LOOP
-                v_product_index := (v_restaurant_index - 1) * 5 + v_indices[j];
-                IF v_prices[v_product_index] >= 1 THEN
-                    v_selected[1] := v_product_index;
-                    v_max_price := v_prices[v_product_index]; v_largest := 1;
-                    EXIT;
-                END IF;
-            END LOOP;
-        END IF;
-        FOR j IN 1..v_count LOOP
+        FOR j IN 2..v_count LOOP
             v_product_index := v_selected[j];
-            -- Лимит позиции оставляет сумму заказа в numeric(8,2), включая округление.
-            v_quantity_limit := CASE WHEN v_prices[v_product_index] = 0 THEN 999999
-                ELSE least(999999, floor(999999.99 / v_count / v_prices[v_product_index] * 1000))::integer END;
+            v_quantity_limit := floor(v_target_amount / v_count / v_prices[v_product_index] * 1000)::integer;
             v_quantity := (1 + floor(random() * v_quantity_limit))::numeric / 1000;
-            v_quantities := array_append(v_quantities, v_quantity);
+            v_quantities[j] := v_quantity;
             v_amount := v_amount + v_prices[v_product_index] * v_quantity;
         END LOOP;
-        IF v_amount < 909.09 THEN
-            v_quantity := ceil((909.09 - v_amount) / v_max_price * 1000) / 1000;
-            v_quantities[v_largest] := v_quantities[v_largest] + v_quantity;
-            v_amount := v_amount + v_max_price * v_quantity;
-        END IF;
-        v_amount := round(v_amount, 2);
+        v_product_index := v_selected[1];
+        v_quantities[1] := ceil((v_target_amount - v_amount) / v_prices[v_product_index] * 1000) / 1000;
+        v_amount := round(v_amount + v_prices[v_product_index] * v_quantities[1], 2);
         v_first_product := v_products[v_selected[1]];
         v_start := greatest(v_hires[v_courier_index]::timestamp,
                             v_history_start);
         -- Дата увольнения включается в период работы; за её пределами заказов нет.
         v_finish := least(v_now, coalesce(v_dismissals[v_courier_index]::timestamp + interval '1 day', v_now));
         v_created := v_start + random() * (v_finish - v_start);
-        v_order_status := (enum_range(NULL::order_status))[1 + floor(random() * 5)::integer];
+        -- В каждом блоке из пяти заказов есть ожидание, ошибка и успешная оплата.
+        v_order_status := (enum_range(NULL::order_status))[1 + (i - 1) % 5];
+        v_payment_status := (enum_range(NULL::payment_status))[
+            CASE v_order_status WHEN 'создан' THEN 3 WHEN 'отменён' THEN 2 ELSE 1 END];
         v_delivered := CASE WHEN v_order_status = 'доставлен' THEN v_created + random() * (v_finish - v_created) END;
         INSERT INTO "order" (courier_id, client_id, address_id, restaurant_id,
-                             order_timestamp, delivery_timestamp, order_amount, status, pay_status, description)
+                             order_timestamp, delivery_timestamp, order_amount, status, description)
         VALUES (v_couriers[v_courier_index], v_clients[v_client_index],
                 v_addresses[(v_client_index - 1) * 4 + 1 + floor(random() * 4)::integer],
                 v_restaurants[v_restaurant_index], v_created, v_delivered,
-                v_amount, v_order_status, 'оплачен', CASE WHEN random() < 0.25 THEN NULL ELSE
+                v_amount, v_order_status, CASE WHEN random() < 0.25 THEN NULL ELSE
                     (SELECT string_agg(substr(v_alphabet, 1 + floor(random() * 33)::int, 1), '')
                         FROM generate_series(1, 1 + floor(random() * 240)::int)) END)
         RETURNING order_id INTO v_order;
@@ -223,6 +206,7 @@ BEGIN
         v_orders := array_append(v_orders, v_order);
         v_payment_times := array_append(v_payment_times, v_created + random() * (v_now - v_created));
         v_payment_types := array_append(v_payment_types, v_payment_type);
+        v_payment_statuses := array_append(v_payment_statuses, v_payment_status);
         v_review_type := (enum_range(NULL::review_entity_type))[1 + floor(random() * 3)::integer];
         v_entity := CASE v_review_type WHEN 'блюдо' THEN v_first_product
                       WHEN 'ресторан' THEN v_restaurants[v_restaurant_index] ELSE v_order END;
@@ -253,14 +237,14 @@ BEGIN
                 v_review_descriptions, v_review_photos, v_review_ratings)
          AS u(order_id, review_timestamp, entity_id, entity_type, description, photo_url, rating);
 
-    -- Ровно 5n платежей для 5n заказов при BR-8.1 означает один успех каждому.
-    -- pay_status уже рассчитан независимо; не полагаемся на платёжный триггер.
-    INSERT INTO payment_core (order_id, type, transaction_id, transaction_timestamp, status)
-    SELECT u.order_id, u.type,
+    -- По одной текущей попытке на заказ. Статус заказа синхронизируется после INSERT.
+    INSERT INTO payment (order_id, type, amount, transaction_id, transaction_timestamp, status)
+    SELECT u.order_id, u.type, o.total_amount,
            CASE WHEN u.type = 'наличные' THEN NULL ELSE exts.uuid_generate_v4() END,
-           u.transaction_timestamp, 'успех'::payment_status
-    FROM unnest(v_orders, v_payment_types, v_payment_times)
-         AS u(order_id, type, transaction_timestamp);
+           u.transaction_timestamp, u.status
+    FROM unnest(v_orders, v_payment_types, v_payment_times, v_payment_statuses)
+         AS u(order_id, type, transaction_timestamp, status)
+    JOIN "order" o ON o.order_id = u.order_id;
 
     -- Шесть календарных месяцев: коэффициент месяца зависит от доставок прошлого.
     INSERT INTO courier_pay (year, month, courier_id, amount, coefficient_used)

@@ -15,15 +15,35 @@ LANGUAGE sql VOLATILE SET search_path = lukovkin_food, pg_catalog AS $$
         SELECT d.restaurant_id, os.product_id, sum(os.quantity) quantity
         FROM delivered d JOIN order_structure os USING (order_id)
         GROUP BY d.restaurant_id, os.product_id
-    ), best_products AS (
-        SELECT DISTINCT ON (restaurant_id) restaurant_id, product_id
-        FROM product_sales ORDER BY restaurant_id, quantity DESC, random()
+    ), top_product_candidates AS (
+        SELECT s.restaurant_id, array_agg(s.product_id) AS candidates
+        FROM product_sales s
+        JOIN (
+            SELECT restaurant_id, max(quantity) AS quantity
+            FROM product_sales GROUP BY restaurant_id
+        ) leaders USING (restaurant_id, quantity)
+        GROUP BY s.restaurant_id
     ), user_sales AS (
         SELECT restaurant_id, client_id, count(*) purchases
         FROM delivered GROUP BY restaurant_id, client_id
-    ), best_users AS (
-        SELECT DISTINCT ON (restaurant_id) restaurant_id, client_id
-        FROM user_sales ORDER BY restaurant_id, purchases DESC, random()
+    ), best_products AS MATERIALIZED (
+        SELECT restaurant_id, candidates[
+            CASE WHEN cardinality(candidates) > 1
+                 THEN 1 + floor(random() * cardinality(candidates))::integer ELSE 1 END] AS product_id
+        FROM top_product_candidates
+    ), top_user_candidates AS (
+        SELECT s.restaurant_id, array_agg(s.client_id) AS candidates
+        FROM user_sales s
+        JOIN (
+            SELECT restaurant_id, max(purchases) AS purchases
+            FROM user_sales GROUP BY restaurant_id
+        ) leaders USING (restaurant_id, purchases)
+        GROUP BY s.restaurant_id
+    ), best_users AS MATERIALIZED (
+        SELECT restaurant_id, candidates[
+            CASE WHEN cardinality(candidates) > 1
+                 THEN 1 + floor(random() * cardinality(candidates))::integer ELSE 1 END] AS client_id
+        FROM top_user_candidates
     )
     SELECT r.restaurant_name::text, p.product_name::text,
            coalesce(t.total, 0), coalesce(t.average, 0), c.login::text
